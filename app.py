@@ -163,8 +163,14 @@ def load_zip_and_prepare(zip_file, state_in: dict) -> Tuple[str, str, str, str, 
     tmpdir = tempfile.mkdtemp(prefix="dataset_")
 
     try:
-        with zipfile.ZipFile(zip_file.name, "r") as zf:
-            zf.extractall(tmpdir)
+        zip_file_path = zip_file.name
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(tmpdir)
+            with zipfile.ZipFile(zip_file_path, "r") as zf:
+                zf.extractall()
+        finally:
+            os.chdir(original_cwd)
 
         root = find_zip_root_with_required_dirs(tmpdir)
         if root is None:
