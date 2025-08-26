@@ -11,6 +11,9 @@ from typing import Dict, List, Optional, Tuple
 import gradio as gr
 from PIL import Image
 
+# Set NO_PROXY to handle local connections in proxied environments
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+
 # ---- Expected folder names inside the ZIP ----
 FOLDER_IMAGES = "falses_normalized_rotated"
 FOLDER_POSTCODE_IMG = "postcode_img_preprocessed"
