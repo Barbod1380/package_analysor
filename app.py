@@ -147,34 +147,45 @@ def build_index(root: str) -> Dict:
 
 # ----------------- Gradio callbacks -----------------
 
-def load_zip_and_prepare(zip_file) -> Tuple[str, str, str, str, str, str, dict, str]:
+def load_zip_and_prepare(zip_file, state_in: dict) -> Tuple[str, str, str, str, str, str, dict, str]:
     """
     1) Extract ZIP to a temp dir
     2) Find the root that contains the 6 folders
     3) Build index and show first item
+    4) Clean up old temp dir if successful
     """
     if zip_file is None:
-        return "", "", "", "", "", "", {}, "Please upload a ZIP."
+        return "", "", "", "", "", "", state_in or {}, "Please upload a ZIP."
 
-    # extract to temp
     tmpdir = tempfile.mkdtemp(prefix="dataset_")
-    with zipfile.ZipFile(zip_file.name, "r") as zf:
-        zf.extractall(tmpdir)
 
-    # find a root that has the required dirs
-    root = find_zip_root_with_required_dirs(tmpdir)
-    if root is None:
-        return "", "", "", "", "", "", {}, (
-            "Could not find all required folders inside the ZIP.\n"
-            f"Expected: {', '.join(REQUIRED_DIRS)}"
-        )
+    try:
+        with zipfile.ZipFile(zip_file.name, "r") as zf:
+            zf.extractall(tmpdir)
 
-    state = build_index(root)
-    if state["n"] == 0:
-        return "", "", "", "", "", "", state, "No images found in falses_normalized_rotated."
+        root = find_zip_root_with_required_dirs(tmpdir)
+        if root is None:
+            shutil.rmtree(tmpdir)
+            return "", "", "", "", "", "", state_in or {}, (
+                "Could not find all required folders inside the ZIP.\n"
+                f"Expected: {', '.join(REQUIRED_DIRS)}"
+            )
 
-    # show first
-    return show_current(state)
+        state = build_index(root)
+        if state["n"] == 0:
+            shutil.rmtree(tmpdir)
+            return "", "", "", "", "", "", state_in or {}, "No images found in falses_normalized_rotated."
+
+        state["tmpdir"] = tmpdir
+
+        if state_in and state_in.get("tmpdir"):
+            shutil.rmtree(state_in.get("tmpdir"), ignore_errors=True)
+
+        return show_current(state)
+
+    except Exception as e:
+        shutil.rmtree(tmpdir)
+        return "", "", "", "", "", "", state_in or {}, f"Error processing ZIP: {e}"
 
 def show_current(state: dict):
     if not state or state.get("n", 0) == 0:
@@ -283,7 +294,7 @@ with gr.Blocks(title="Postal Data Viewer") as demo:
     # wiring
     load_btn.click(
         load_zip_and_prepare,
-        inputs=[zip_input],
+        inputs=[zip_input, state],
         outputs=[main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header],
     ).then(
         list_keys, inputs=[state], outputs=[key_dropdown]
