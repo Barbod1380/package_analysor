@@ -11,6 +11,9 @@ from typing import Dict, List, Optional, Tuple
 import gradio as gr
 from PIL import Image
 
+# Set NO_PROXY to handle local connections in proxied environments
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+
 # ---- Expected folder names inside the ZIP ----
 FOLDER_IMAGES = "falses_normalized_rotated"
 FOLDER_POSTCODE_IMG = "postcode_img_preprocessed"
@@ -160,8 +163,14 @@ def load_zip_and_prepare(zip_file, state_in: dict) -> Tuple[str, str, str, str, 
     tmpdir = tempfile.mkdtemp(prefix="dataset_")
 
     try:
-        with zipfile.ZipFile(zip_file.name, "r") as zf:
-            zf.extractall(tmpdir)
+        zip_file_path = zip_file.name
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(tmpdir)
+            with zipfile.ZipFile(zip_file_path, "r") as zf:
+                zf.extractall()
+        finally:
+            os.chdir(original_cwd)
 
         root = find_zip_root_with_required_dirs(tmpdir)
         if root is None:
