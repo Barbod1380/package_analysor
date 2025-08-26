@@ -56,14 +56,24 @@ def read_text_all(path: Optional[str]) -> str:
             return (f.read().strip() or "_")
 
 def load_image(path: Optional[str], max_side: int = 900) -> Optional[Image.Image]:
-    if not path or not os.path.exists(path):
+    """Safely load an image from ``path``.
+
+    Returns ``None`` if ``path`` is missing or points to a directory. This
+    prevents ``Image.open`` from trying to open directories which raises
+    ``PermissionError`` on Windows.
+    """
+    if not path or not os.path.isfile(path):
         return None
-    img = Image.open(path).convert("RGB")
-    w, h = img.size
-    scale = min(1.0, max_side / max(w, h))
-    if scale < 1.0:
-        img = img.resize((int(w * scale), int(h * scale)))
-    return img
+    try:
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+            w, h = img.size
+            scale = min(1.0, max_side / max(w, h))
+            if scale < 1.0:
+                img = img.resize((int(w * scale), int(h * scale)))
+            return img
+    except Exception:
+        return None
 
 def stem(path: str) -> str:
     return os.path.splitext(os.path.basename(path))[0]
@@ -113,11 +123,13 @@ def build_index(root: str) -> Dict:
     read_words_dir = os.path.join(root, FOLDER_READ_WORDS)
     region_dir = os.path.join(root, FOLDER_REGION)
 
-    # collect primary images
+    # collect primary images (case-insensitive, cross-platform)
     image_map: Dict[str, str] = {}
-    for ext in IMG_EXTS:
-        for p in glob.glob(os.path.join(images_dir, f"**/*{ext}"), recursive=True):
-            image_map[stem(p)] = p
+    for dirpath, _dirs, files in os.walk(images_dir):
+        for name in files:
+            if name.lower().endswith(IMG_EXTS):
+                p = os.path.join(dirpath, name)
+                image_map[stem(p)] = p
 
     keys = sorted(image_map.keys())
 
@@ -284,9 +296,9 @@ with gr.Blocks(title="Postal Data Viewer") as demo:
         key_dropdown = gr.Dropdown(choices=[], label="Jump to key", interactive=True)
 
     with gr.Row():
-        main_img = gr.Image(label="Normalized image (A)", interactive=False)
-        pc_img = gr.Image(label="Postcode box", interactive=False)
-        rc_img = gr.Image(label="Receiver box", interactive=False)
+        main_img = gr.Image(label="Normalized image (A)", interactive=False, type="pil")
+        pc_img = gr.Image(label="Postcode box", interactive=False, type="pil")
+        rc_img = gr.Image(label="Receiver box", interactive=False, type="pil")
 
     with gr.Row():
         words_html = gr.HTML(label="Words (Persian)")
