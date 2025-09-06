@@ -3,6 +3,7 @@ import os
 import zipfile
 import tempfile
 from typing import Dict, List, Optional, Tuple
+import csv
 
 import gradio as gr
 from PIL import Image
@@ -203,6 +204,7 @@ def build_index(root: str) -> Dict:
         "entries": entries,
         "n": len(entries),
         "i": 0,  # current index pointer
+        "annotations": {},  # ADDED: {key: {"label": str, "explanation": str}}
     }
 
 
@@ -210,13 +212,18 @@ def build_index(root: str) -> Dict:
 
 def show_current(state: dict, show_debug: bool):
     if not state or state.get("n", 0) == 0:
+        # On startup, before loading, everything is empty/disabled.
         return (None, None, None,
                 "<div>No data.</div>", "<div>No data.</div>", "<div>No data.</div>",
-                state, "No data.", "")
+                state, "No data.", "",
+                gr.update(value=None, interactive=False),
+                gr.update(value="", visible=False, interactive=False),
+                gr.update(interactive=False))
 
     i = state["i"]
     n = state["n"]
     e = state["entries"][i]
+    key = e["key"]
 
     main_img = load_image(e["image"])
     pc_img = load_image(e["postcode_img"])
@@ -231,7 +238,7 @@ def show_current(state: dict, show_debug: bool):
     postcode_html = f'<div dir="rtl" style="text-align:right;">{postcode}</div>'
     region_html = f'<div dir="rtl" style="text-align:right;">{region}</div>'
 
-    header = f"{e['key']}  ({i+1}/{n})"
+    header = f"{key}  ({i+1}/{n})"
 
     debug_text = ""
     if show_debug:
@@ -246,7 +253,18 @@ def show_current(state: dict, show_debug: bool):
             f"</pre>"
         )
 
-    return main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_text
+    # Load current annotation
+    annotation = state.get("annotations", {}).get(key, {})
+    label = annotation.get("label")
+    explanation = annotation.get("explanation", "")
+
+    # If a label exists, show the explanation box if it's "Wrong"
+    explanation_visible = (label == "Wrong")
+
+    return (main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_text,
+            gr.update(value=label, interactive=True),
+            gr.update(value=explanation, visible=explanation_visible, interactive=True),
+            gr.update(interactive=True))
 
 
 def load_zip_and_prepare(zip_file, show_debug: bool):
@@ -256,17 +274,21 @@ def load_zip_and_prepare(zip_file, show_debug: bool):
     3) Build index and show first item
     """
     if zip_file is None:
-        empty = (None, None, None, "", "", "", {}, "Please upload a ZIP first.", "")
+        empty = (None, None, None, "", "", "", {}, "Please upload a ZIP first.", "",
+                 gr.update(value=None, interactive=False), gr.update(value="", interactive=False, visible=False), gr.update(interactive=False))
         dropdown_update = gr.update(choices=[], value=None)
         status = "Please upload a ZIP."
-        return (*empty, dropdown_update, status)
+        export_btn_update = gr.update(interactive=False)
+        return (*empty, dropdown_update, status, export_btn_update)
 
     zip_path = getattr(zip_file, "name", None) or str(zip_file)
     if not os.path.isfile(zip_path):
-        empty = (None, None, None, "", "", "", {}, "Invalid ZIP file.", "")
+        empty = (None, None, None, "", "", "", {}, "Invalid ZIP file.", "",
+                 gr.update(value=None, interactive=False), gr.update(value="", interactive=False, visible=False), gr.update(interactive=False))
         dropdown_update = gr.update(choices=[], value=None)
         status = "Invalid ZIP file."
-        return (*empty, dropdown_update, status)
+        export_btn_update = gr.update(interactive=False)
+        return (*empty, dropdown_update, status, export_btn_update)
 
     tmpdir = tempfile.mkdtemp(prefix="dataset_")
     with zipfile.ZipFile(zip_path, "r") as zf:
@@ -274,44 +296,55 @@ def load_zip_and_prepare(zip_file, show_debug: bool):
 
     root = find_zip_root_with_required_dirs(tmpdir)
     if root is None:
-        empty = (None, None, None, "", "", "", {}, "Required folders not found in ZIP.", "")
+        empty = (None, None, None, "", "", "", {}, "Required folders not found in ZIP.", "",
+                 gr.update(value=None, interactive=False), gr.update(value="", interactive=False, visible=False), gr.update(interactive=False))
         dropdown_update = gr.update(choices=[], value=None)
         status = f"Could not find all required folders: {', '.join(REQUIRED_DIRS)}"
-        return (*empty, dropdown_update, status)
+        export_btn_update = gr.update(interactive=False)
+        return (*empty, dropdown_update, status, export_btn_update)
 
     state = build_index(root)
     state["tmpdir"] = tmpdir  # keep alive for session
 
     if state["n"] == 0:
-        empty = (None, None, None, "", "", "", state, "No images found in falses_normalized_rotated.", "")
+        empty = (None, None, None, "", "", "", state, "No images found in falses_normalized_rotated.", "",
+                 gr.update(value=None, interactive=False), gr.update(value="", interactive=False, visible=False), gr.update(interactive=False))
         dropdown_update = gr.update(choices=[], value=None)
         status = "No images found."
-        return (*empty, dropdown_update, status)
+        export_btn_update = gr.update(interactive=False)
+        return (*empty, dropdown_update, status, export_btn_update)
 
-    main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_text = show_current(state, show_debug)
+    _main_img, _pc_img, _rc_img, _words_html, _postcode_html, _region_html, state, _header, _debug_text, label_update, expl_update, save_update = show_current(state, show_debug)
     keys = [e["key"] for e in state["entries"]]
     dropdown_update = gr.update(choices=keys, value=keys[0] if keys else None)
     status = f"Loaded {state['n']} items."
-    return main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_text, dropdown_update, status
+    export_btn_update = gr.update(interactive=True)
+
+    # The outputs of show_current are now 12, so we can unpack them.
+    return (_main_img, _pc_img, _rc_img, _words_html, _postcode_html, _region_html, state, _header, _debug_text,
+            label_update, expl_update, save_update, dropdown_update, status, export_btn_update)
 
 
 def goto_prev(state: dict, show_debug: bool):
     if not state or state.get("n", 0) == 0:
-        return (None, None, None, "", "", "", state, "No data.", "")
+        return (None, None, None, "", "", "", state, "No data.", "",
+                gr.update(interactive=False), gr.update(interactive=False, visible=False), gr.update(interactive=False))
     state["i"] = (state["i"] - 1) % state["n"]
     return show_current(state, show_debug)
 
 
 def goto_next(state: dict, show_debug: bool):
     if not state or state.get("n", 0) == 0:
-        return (None, None, None, "", "", "", state, "No data.", "")
+        return (None, None, None, "", "", "", state, "No data.", "",
+                gr.update(interactive=False), gr.update(interactive=False, visible=False), gr.update(interactive=False))
     state["i"] = (state["i"] + 1) % state["n"]
     return show_current(state, show_debug)
 
 
 def goto_key(state: dict, key: str, show_debug: bool):
     if not state or state.get("n", 0) == 0:
-        return (None, None, None, "", "", "", state, "No data.", "")
+        return (None, None, None, "", "", "", state, "No data.", "",
+                gr.update(interactive=False), gr.update(interactive=False, visible=False), gr.update(interactive=False))
     if key:
         for idx, e in enumerate(state["entries"]):
             if e["key"] == key:
@@ -325,6 +358,61 @@ def list_keys(state: dict):
         return gr.update(choices=[], value=None)
     keys = [e["key"] for e in state["entries"]]
     return gr.update(choices=keys, value=keys[state["i"]] if 0 <= state["i"] < len(keys) else keys[0])
+
+
+def on_label_change(label: str):
+    """Show explanation box only if label is 'Wrong'."""
+    return gr.update(visible=(label == "Wrong"))
+
+
+def save_annotation(state: dict, label: str, explanation: str):
+    if not state or state.get("n", 0) == 0 or not label:
+        return state, "Cannot save: No data or no label selected."
+
+    i = state["i"]
+    key = state["entries"][i]["key"]
+
+    # Ensure annotations dict exists
+    if "annotations" not in state:
+        state["annotations"] = {}
+
+    state["annotations"][key] = {
+        "label": label,
+        "explanation": explanation if label == "Wrong" else "",
+    }
+
+    return state, f"Annotation for '{key}' saved."
+
+
+def export_csv(state: dict) -> Tuple[dict, gr.update]:
+    if not state or not state.get("annotations"):
+        return state, gr.update(value=None)
+
+    # Create a temporary file to write the CSV
+    tmpdir = state.get("tmpdir")
+    if not tmpdir:
+        # Fallback if tmpdir isn't in state for some reason
+        tmpdir = tempfile.mkdtemp()
+
+    filepath = os.path.join(tmpdir, "annotations.csv")
+
+    # Get all keys from entries to ensure order and completeness
+    all_keys = [e["key"] for e in state.get("entries", [])]
+    annotations = state.get("annotations", {})
+
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["image_key", "label", "explanation"])
+
+        for key in all_keys:
+            annotation = annotations.get(key)
+            if annotation:
+                writer.writerow([key, annotation.get("label", ""), annotation.get("explanation", "")])
+            else:
+                # Write a row even if not annotated, to show it was seen but not labeled
+                writer.writerow([key, "Not Annotated", ""])
+
+    return state, gr.update(value=filepath, interactive=True)
 
 
 # ----------------- UI -----------------
@@ -355,6 +443,22 @@ with gr.Blocks(title="Postal Data Viewer") as demo:
 
     debug_md = gr.Markdown("", visible=True)
 
+    with gr.Group():
+        gr.Markdown("#### Annotation")
+        with gr.Row():
+            label_radio = gr.Radio(["Correct", "Wrong"], label="Label", interactive=False)
+            save_btn = gr.Button("Save Annotation", interactive=False)
+        with gr.Row():
+            explanation_txt = gr.Textbox(
+                label="Explanation (if wrong)",
+                lines=3,
+                visible=False,
+                interactive=False
+            )
+        with gr.Row():
+            export_btn = gr.Button("Export to CSV", interactive=False)
+            csv_download = gr.File(label="Download CSV", interactive=False)
+
     with gr.Row():
         prev_btn = gr.Button("⬅ Prev")
         next_btn = gr.Button("Next ➡")
@@ -369,27 +473,57 @@ with gr.Blocks(title="Postal Data Viewer") as demo:
         outputs=[
             main_img, pc_img, rc_img,
             words_html, postcode_html, region_html,
-            state, header, debug_md, key_dropdown, status
+            state, header, debug_md,
+            label_radio, explanation_txt, save_btn, # ADDED
+            key_dropdown, status, export_btn        # MODIFIED
         ],
     )
 
     prev_btn.click(
         goto_prev,
         inputs=[state, show_debug],
-        outputs=[main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md],
+        outputs=[
+            main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md,
+            label_radio, explanation_txt, save_btn
+        ],
     )
 
     next_btn.click(
         goto_next,
         inputs=[state, show_debug],
-        outputs=[main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md],
-    )
+        outputs=[
+            main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md,
+            label_radio, explanation_txt, save_btn
+        ],
+)
 
     key_dropdown.change(
         goto_key,
         inputs=[state, key_dropdown, show_debug],
-        outputs=[main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md],
+        outputs=[
+            main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md,
+            label_radio, explanation_txt, save_btn
+        ],
     )
+
+    label_radio.change(
+        on_label_change,
+        inputs=[label_radio],
+        outputs=[explanation_txt]
+    )
+
+    save_btn.click(
+        save_annotation,
+        inputs=[state, label_radio, explanation_txt],
+        outputs=[state, status]
+    )
+
+    export_btn.click(
+        export_csv,
+        inputs=[state],
+        outputs=[state, csv_download]
+    )
+
 
 if __name__ == "__main__":
     demo.launch()
