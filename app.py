@@ -3,14 +3,15 @@ import os
 import zipfile
 import tempfile
 from typing import Dict, List, Optional, Tuple
+import csv
 
 import gradio as gr
 from PIL import Image
 
 # ---- Expected folder names inside the ZIP ----
-FOLDER_IMAGES = "falses_normalized_rotated"
+FOLDER_IMAGES = "falses_preprocessed_rotated"
 FOLDER_POSTCODE_IMG = "postcode_img_preprocessed"
-FOLDER_RECEIVER_IMG = "receiver_img_preprocessed"
+FOLDER_RECEIVER_IMG = "receiver_image_preprocessed"
 FOLDER_READ_POSTCODE = "read_postcode"
 FOLDER_READ_WORDS = "read_words"
 FOLDER_REGION = "address_region_pred"
@@ -84,6 +85,25 @@ def load_image(path: Optional[str], max_side: int = 900) -> Optional[Image.Image
 def stem(path: str) -> str:
     return os.path.splitext(os.path.basename(path))[0]
 
+def extract_base_key(filename: str) -> str:
+    """
+    Extract the base key from a filename, which is everything up to and including 'region_X'
+    where X is a number (can be negative).
+    
+    Example:
+        '20251017__gate_5__barcode_100250421000008440000111__region_-1_address_region.txt'
+        -> '20251017__gate_5__barcode_100250421000008440000111__region_-1'
+    """
+    import re
+    # First get the stem (filename without extension)
+    name = stem(filename)
+    # Pattern to match up to and including 'region_' followed by a number
+    match = re.match(r'^(.+__region_-?\d+)', name)
+    if match:
+        return match.group(1)
+    # If no match, fall back to the full stem
+    return name
+
 
 def find_zip_root_with_required_dirs(extracted_dir: str) -> Optional[str]:
     """
@@ -109,7 +129,8 @@ def collect_images(images_dir: str) -> Dict[str, str]:
             if name.lower().endswith(IMG_EXTS):
                 p = os.path.join(dirpath, name)
                 if os.path.isfile(p):
-                    image_map[stem(p).lower()] = p
+                    base_key = extract_base_key(p).lower()
+                    image_map[base_key] = p
     return image_map
 
 
@@ -126,17 +147,49 @@ def find_by_stem_case_insensitive(folder: str, base: str) -> Optional[str]:
             p = os.path.join(folder, name)
             if not os.path.isfile(p):
                 continue
-            # match by stem only
-            if stem(name).lower() == base_low:
+            # match by base key (up to region_X)
+            if extract_base_key(name).lower() == base_low:
                 return p
         # if not found at top level, walk deeper:
         for dirpath, _dirs, files in os.walk(folder):
             for name in files:
                 p = os.path.join(dirpath, name)
-                if os.path.isfile(p) and stem(name).lower() == base_low:
+                if os.path.isfile(p) and extract_base_key(name).lower() == base_low:
                     return p
     except PermissionError:
         # If the folder has restricted entries, just skip them.
+        return None
+    return None
+
+def find_text_file_by_suffix(folder: str, base_key: str, suffix_pattern: str) -> Optional[str]:
+    """
+    Find a text file in 'folder' whose base key matches 'base_key' and contains the suffix_pattern.
+    For example, base_key="file__region_1" and suffix_pattern="postcode" would match:
+    - file__region_1_postcode.txt
+    - file__region_1_read_postcode.txt
+    """
+    if not folder or not os.path.isdir(folder):
+        return None
+    base_low = base_key.lower()
+    suffix_low = suffix_pattern.lower()
+    
+    try:
+        for name in os.listdir(folder):
+            p = os.path.join(folder, name)
+            if not os.path.isfile(p):
+                continue
+            name_low = name.lower()
+            # Check if base key matches and suffix pattern is in the filename
+            if extract_base_key(name).lower() == base_low and suffix_low in name_low:
+                return p
+        # if not found at top level, walk deeper:
+        for dirpath, _dirs, files in os.walk(folder):
+            for name in files:
+                p = os.path.join(dirpath, name)
+                name_low = name.lower()
+                if os.path.isfile(p) and extract_base_key(name).lower() == base_low and suffix_low in name_low:
+                    return p
+    except PermissionError:
         return None
     return None
 
@@ -166,9 +219,9 @@ def build_index(root: str) -> Dict:
 
     entries = []
     for k_low in keys:
-        # k_low is lowercase stem
+        # k_low is lowercase base key (up to region_X)
         k_path = image_map.get(k_low)
-        k = stem(k_path) if k_path else k_low  # keep original case (nice for header)
+        k = extract_base_key(k_path) if k_path else k_low  # keep original case (nice for header)
 
         # NOTE: For an image like 'my_file.png', 'k' would be 'my_file'.
 
@@ -178,24 +231,23 @@ def build_index(root: str) -> Dict:
         # EXPECTS: A file in 'receiver_img_preprocessed' with the same stem (e.g., 'my_file.bmp')
         receiver_img = find_by_stem_case_insensitive(recv_img_dir, k)
 
-        # EXPECTS: A file in 'read_postcode' named exactly '<image_stem>_postcode.txt' (e.g., 'my_file_postcode.txt')
-        postcode_txt = os.path.join(read_postcode_dir, f"{k}_postcode.txt")
+        # EXPECTS: A file in 'read_postcode' with base key matching and containing 'postcode'
+        postcode_txt = find_text_file_by_suffix(read_postcode_dir, k, "postcode")
         
-        # EXPECTS: A file in 'read_words' named exactly '<image_stem>_words.txt' (e.g., 'my_file_words.txt')
-        words_txt = os.path.join(read_words_dir, f"{k}_words.txt")
+        # EXPECTS: A file in 'read_words' with base key matching and containing 'words' or 'read'
+        words_txt = find_text_file_by_suffix(read_words_dir, k, "words") or find_text_file_by_suffix(read_words_dir, k, "read")
 
-        # EXPECTS: A file in 'address_region_pred' named exactly '<image_stem>_words_region_by_addr.txt'
-        # (e.g., 'my_file_words_region_by_addr.txt')
-        region_txt = os.path.join(region_dir, f"{k}_words_region_by_addr.txt")
+        # EXPECTS: A file in 'address_region_pred' with base key matching and containing 'region' or 'address'
+        region_txt = find_text_file_by_suffix(region_dir, k, "region") or find_text_file_by_suffix(region_dir, k, "address")
 
         entries.append({
             "key": k,
             "image": k_path,
             "postcode_img": postcode_img,
             "receiver_img": receiver_img,
-            "postcode_txt": postcode_txt if os.path.isfile(postcode_txt) else None,
-            "words_txt": words_txt if os.path.isfile(words_txt) else None,
-            "region_txt": region_txt if os.path.isfile(region_txt) else None,
+            "postcode_txt": postcode_txt if postcode_txt and os.path.isfile(postcode_txt) else None,
+            "words_txt": words_txt if words_txt and os.path.isfile(words_txt) else None,
+            "region_txt": region_txt if region_txt and os.path.isfile(region_txt) else None,
         })
 
     return {
@@ -203,6 +255,7 @@ def build_index(root: str) -> Dict:
         "entries": entries,
         "n": len(entries),
         "i": 0,  # current index pointer
+        "annotations": {},  # ADDED: {key: {"label": str, "explanation": str}}
     }
 
 
@@ -210,13 +263,18 @@ def build_index(root: str) -> Dict:
 
 def show_current(state: dict, show_debug: bool):
     if not state or state.get("n", 0) == 0:
+        # On startup, before loading, everything is empty/disabled.
         return (None, None, None,
                 "<div>No data.</div>", "<div>No data.</div>", "<div>No data.</div>",
-                state, "No data.", "")
+                state, "No data.", "",
+                gr.update(value=None, interactive=False),
+                gr.update(value="", visible=False, interactive=False),
+                gr.update(interactive=False))
 
     i = state["i"]
     n = state["n"]
     e = state["entries"][i]
+    key = e["key"]
 
     main_img = load_image(e["image"])
     pc_img = load_image(e["postcode_img"])
@@ -231,7 +289,7 @@ def show_current(state: dict, show_debug: bool):
     postcode_html = f'<div dir="rtl" style="text-align:right;">{postcode}</div>'
     region_html = f'<div dir="rtl" style="text-align:right;">{region}</div>'
 
-    header = f"{e['key']}  ({i+1}/{n})"
+    header = f"{key}  ({i+1}/{n})"
 
     debug_text = ""
     if show_debug:
@@ -246,7 +304,18 @@ def show_current(state: dict, show_debug: bool):
             f"</pre>"
         )
 
-    return main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_text
+    # Load current annotation
+    annotation = state.get("annotations", {}).get(key, {})
+    label = annotation.get("label")
+    explanation = annotation.get("explanation", "")
+    
+    # If a label exists, show the explanation box if it's "Wrong"
+    explanation_visible = (label == "Wrong")
+
+    return (main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_text,
+            gr.update(value=label, interactive=True),
+            gr.update(value=explanation, visible=explanation_visible, interactive=True),
+            gr.update(interactive=True))
 
 
 def load_zip_and_prepare(zip_file, show_debug: bool):
@@ -256,17 +325,21 @@ def load_zip_and_prepare(zip_file, show_debug: bool):
     3) Build index and show first item
     """
     if zip_file is None:
-        empty = (None, None, None, "", "", "", {}, "Please upload a ZIP first.", "")
+        empty = (None, None, None, "", "", "", {}, "Please upload a ZIP first.", "",
+                 gr.update(value=None, interactive=False), gr.update(value="", interactive=False, visible=False), gr.update(interactive=False))
         dropdown_update = gr.update(choices=[], value=None)
         status = "Please upload a ZIP."
-        return (*empty, dropdown_update, status)
+        export_btn_update = gr.update(interactive=False)
+        return (*empty, dropdown_update, status, export_btn_update)
 
     zip_path = getattr(zip_file, "name", None) or str(zip_file)
     if not os.path.isfile(zip_path):
-        empty = (None, None, None, "", "", "", {}, "Invalid ZIP file.", "")
+        empty = (None, None, None, "", "", "", {}, "Invalid ZIP file.", "",
+                 gr.update(value=None, interactive=False), gr.update(value="", interactive=False, visible=False), gr.update(interactive=False))
         dropdown_update = gr.update(choices=[], value=None)
         status = "Invalid ZIP file."
-        return (*empty, dropdown_update, status)
+        export_btn_update = gr.update(interactive=False)
+        return (*empty, dropdown_update, status, export_btn_update)
 
     tmpdir = tempfile.mkdtemp(prefix="dataset_")
     with zipfile.ZipFile(zip_path, "r") as zf:
@@ -274,44 +347,55 @@ def load_zip_and_prepare(zip_file, show_debug: bool):
 
     root = find_zip_root_with_required_dirs(tmpdir)
     if root is None:
-        empty = (None, None, None, "", "", "", {}, "Required folders not found in ZIP.", "")
+        empty = (None, None, None, "", "", "", {}, "Required folders not found in ZIP.", "",
+                 gr.update(value=None, interactive=False), gr.update(value="", interactive=False, visible=False), gr.update(interactive=False))
         dropdown_update = gr.update(choices=[], value=None)
         status = f"Could not find all required folders: {', '.join(REQUIRED_DIRS)}"
-        return (*empty, dropdown_update, status)
+        export_btn_update = gr.update(interactive=False)
+        return (*empty, dropdown_update, status, export_btn_update)
 
     state = build_index(root)
     state["tmpdir"] = tmpdir  # keep alive for session
 
     if state["n"] == 0:
-        empty = (None, None, None, "", "", "", state, "No images found in falses_normalized_rotated.", "")
+        empty = (None, None, None, "", "", "", state, "No images found in falses_normalized_rotated.", "",
+                 gr.update(value=None, interactive=False), gr.update(value="", interactive=False, visible=False), gr.update(interactive=False))
         dropdown_update = gr.update(choices=[], value=None)
         status = "No images found."
-        return (*empty, dropdown_update, status)
+        export_btn_update = gr.update(interactive=False)
+        return (*empty, dropdown_update, status, export_btn_update)
 
-    main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_text = show_current(state, show_debug)
+    _main_img, _pc_img, _rc_img, _words_html, _postcode_html, _region_html, state, _header, _debug_text, label_update, expl_update, save_update = show_current(state, show_debug)
     keys = [e["key"] for e in state["entries"]]
     dropdown_update = gr.update(choices=keys, value=keys[0] if keys else None)
     status = f"Loaded {state['n']} items."
-    return main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_text, dropdown_update, status
+    export_btn_update = gr.update(interactive=True)
+    
+    # The outputs of show_current are now 12, so we can unpack them.
+    return (_main_img, _pc_img, _rc_img, _words_html, _postcode_html, _region_html, state, _header, _debug_text,
+            label_update, expl_update, save_update, dropdown_update, status, export_btn_update)
 
 
 def goto_prev(state: dict, show_debug: bool):
     if not state or state.get("n", 0) == 0:
-        return (None, None, None, "", "", "", state, "No data.", "")
+        return (None, None, None, "", "", "", state, "No data.", "",
+                gr.update(interactive=False), gr.update(interactive=False, visible=False), gr.update(interactive=False))
     state["i"] = (state["i"] - 1) % state["n"]
     return show_current(state, show_debug)
 
 
 def goto_next(state: dict, show_debug: bool):
     if not state or state.get("n", 0) == 0:
-        return (None, None, None, "", "", "", state, "No data.", "")
+        return (None, None, None, "", "", "", state, "No data.", "",
+                gr.update(interactive=False), gr.update(interactive=False, visible=False), gr.update(interactive=False))
     state["i"] = (state["i"] + 1) % state["n"]
     return show_current(state, show_debug)
 
 
 def goto_key(state: dict, key: str, show_debug: bool):
     if not state or state.get("n", 0) == 0:
-        return (None, None, None, "", "", "", state, "No data.", "")
+        return (None, None, None, "", "", "", state, "No data.", "",
+                gr.update(interactive=False), gr.update(interactive=False, visible=False), gr.update(interactive=False))
     if key:
         for idx, e in enumerate(state["entries"]):
             if e["key"] == key:
@@ -325,6 +409,61 @@ def list_keys(state: dict):
         return gr.update(choices=[], value=None)
     keys = [e["key"] for e in state["entries"]]
     return gr.update(choices=keys, value=keys[state["i"]] if 0 <= state["i"] < len(keys) else keys[0])
+
+
+def on_label_change(label: str):
+    """Show explanation box only if label is 'Wrong'."""
+    return gr.update(visible=(label == "Wrong"))
+
+
+def save_annotation(state: dict, label: str, explanation: str):
+    if not state or state.get("n", 0) == 0 or not label:
+        return state, "Cannot save: No data or no label selected."
+    
+    i = state["i"]
+    key = state["entries"][i]["key"]
+    
+    # Ensure annotations dict exists
+    if "annotations" not in state:
+        state["annotations"] = {}
+        
+    state["annotations"][key] = {
+        "label": label,
+        "explanation": explanation if label == "Wrong" else "",
+    }
+    
+    return state, f"Annotation for '{key}' saved."
+
+
+def export_csv(state: dict) -> Tuple[dict, gr.update]:
+    if not state or not state.get("annotations"):
+        return state, gr.update(value=None)
+
+    # Create a temporary file to write the CSV
+    tmpdir = state.get("tmpdir")
+    if not tmpdir:
+        # Fallback if tmpdir isn't in state for some reason
+        tmpdir = tempfile.mkdtemp()
+        
+    filepath = os.path.join(tmpdir, "annotations.csv")
+    
+    # Get all keys from entries to ensure order and completeness
+    all_keys = [e["key"] for e in state.get("entries", [])]
+    annotations = state.get("annotations", {})
+
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["image_key", "label", "explanation"])
+        
+        for key in all_keys:
+            annotation = annotations.get(key)
+            if annotation:
+                writer.writerow([key, annotation.get("label", ""), annotation.get("explanation", "")])
+            else:
+                # Write a row even if not annotated, to show it was seen but not labeled
+                writer.writerow([key, "Not Annotated", ""])
+
+    return state, gr.update(value=filepath, interactive=True)
 
 
 # ----------------- UI -----------------
@@ -355,6 +494,22 @@ with gr.Blocks(title="Postal Data Viewer") as demo:
 
     debug_md = gr.Markdown("", visible=True)
 
+    with gr.Group():
+        gr.Markdown("#### Annotation")
+        with gr.Row():
+            label_radio = gr.Radio(["Correct", "Wrong"], label="Label", interactive=False)
+            save_btn = gr.Button("Save Annotation", interactive=False)
+        with gr.Row():
+            explanation_txt = gr.Textbox(
+                label="Explanation (if wrong)", 
+                lines=3, 
+                visible=False, 
+                interactive=False
+            )
+        with gr.Row():
+            export_btn = gr.Button("Export to CSV", interactive=False)
+            csv_download = gr.File(label="Download CSV", interactive=False)
+
     with gr.Row():
         prev_btn = gr.Button("⬅ Prev")
         next_btn = gr.Button("Next ➡")
@@ -369,27 +524,57 @@ with gr.Blocks(title="Postal Data Viewer") as demo:
         outputs=[
             main_img, pc_img, rc_img,
             words_html, postcode_html, region_html,
-            state, header, debug_md, key_dropdown, status
+            state, header, debug_md,
+            label_radio, explanation_txt, save_btn, # ADDED
+            key_dropdown, status, export_btn        # MODIFIED
         ],
     )
 
     prev_btn.click(
         goto_prev,
         inputs=[state, show_debug],
-        outputs=[main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md],
+        outputs=[
+            main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md,
+            label_radio, explanation_txt, save_btn
+        ],
     )
 
     next_btn.click(
         goto_next,
         inputs=[state, show_debug],
-        outputs=[main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md],
-    )
+        outputs=[
+            main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md,
+            label_radio, explanation_txt, save_btn
+        ],
+)
 
     key_dropdown.change(
         goto_key,
         inputs=[state, key_dropdown, show_debug],
-        outputs=[main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md],
+        outputs=[
+            main_img, pc_img, rc_img, words_html, postcode_html, region_html, state, header, debug_md,
+            label_radio, explanation_txt, save_btn
+        ],
     )
+
+    label_radio.change(
+        on_label_change,
+        inputs=[label_radio],
+        outputs=[explanation_txt]
+    )
+
+    save_btn.click(
+        save_annotation,
+        inputs=[state, label_radio, explanation_txt],
+        outputs=[state, status]
+    )
+
+    export_btn.click(
+        export_csv,
+        inputs=[state],
+        outputs=[state, csv_download]
+    )
+
 
 if __name__ == "__main__":
     demo.launch()
